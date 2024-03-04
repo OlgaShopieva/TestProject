@@ -1,85 +1,69 @@
 package org.example;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.*;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.time.LocalDateTime;
-import java.time.temporal.ChronoUnit;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Semaphore;
 
 
 public class CrptApi {
-
-    public static void main(String[] args) throws JsonProcessingException {
-        TimeUnit timeUnit = new TimeUnit(1, ChronoUnit.SECONDS);
-        int requestLimit = 30;
-        CrptApi crptApi = new CrptApi(timeUnit, requestLimit);
-
-        Object document = "someDocument";
-        String signature = "someSignature";
-        crptApi.createDocument(document, signature);
-    }
-
-    private final Lock lock = new ReentrantLock();
     private final TimeUnit timeUnit;
-    private final int requestLimit;
-    private int requestCount = 0;
-    private LocalDateTime lastRequestTime = LocalDateTime.now();
 
-    private record TimeUnit(int timeValue, ChronoUnit unit) {
-        public long toTimeUnit() {
-            return unit.getDuration().multipliedBy(timeValue).getSeconds();
-        }
-    }
+    private final int requestLimit;
+
+    private final Semaphore semaphore;
 
     public CrptApi(TimeUnit timeUnit, int requestLimit) {
         this.timeUnit = timeUnit;
         this.requestLimit = requestLimit;
+        this.semaphore = new Semaphore(requestLimit);
     }
 
-    public void createDocument(Object document, String signature) throws JsonProcessingException {
-        lock.lock();
+    static class DocumentDTO implements Serializable{
+        private String description;
+        private String docId;
+        // .... необходимые поля и методы
+    }
+
+    public void createDocument(DocumentDTO document, String signature) {
         try {
-            LocalDateTime currentTime = LocalDateTime.now();
-            if (currentTime.isAfter(lastRequestTime.plusSeconds(timeUnit.toTimeUnit()))){
-                requestCount = 0;
-                lastRequestTime = currentTime;
-            }
-
-            if (requestCount < requestLimit) {
-                sendPostRequest(document, signature);
-                requestCount++;
-            } else {
-                try {
-                    Thread.sleep(1000);
-                    createDocument(document, signature);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-        } finally {
-            lock.unlock();
+            semaphore.acquire();
+            sendPostRequest(document, signature);
+            semaphore.release();
+        } catch (InterruptedException | JsonProcessingException e) {
+            throw new RuntimeException(e);
         }
+
     }
 
-    private void sendPostRequest(Object document, String signature) throws JsonProcessingException {
+    private void sendPostRequest(DocumentDTO document, String signature) throws JsonProcessingException {
         HttpClient client = HttpClient.newHttpClient();
+        ObjectMapper mapper = new ObjectMapper();
+
+        ObjectNode jsonBody = mapper.createObjectNode();
+        jsonBody.set("document", mapper.valueToTree(document));
+        jsonBody.put("signature", signature);
+
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create("https://ismp.crpt.ru/api/v3/lk/documents/create"))
                 .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(new ObjectMapper().writeValueAsString(document)))
+                .POST(HttpRequest.BodyPublishers.ofString(new ObjectMapper().writeValueAsString(jsonBody)))
                 .build();
 
         try {
             HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
 
-            if (response.statusCode() != 200) {
-                throw new RuntimeException("Ошибка отправки запроса : " + response.statusCode());
+            if (response.statusCode() == 200) {
+                System.out.println("Successfully post document!");
+
+            } else {
+                throw new RuntimeException("Error creating document: " + response.statusCode());
             }
 
             String responseBody = response.body();
